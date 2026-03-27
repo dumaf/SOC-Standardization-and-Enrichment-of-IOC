@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+results/
+*.json
+*.jsonl
+main.py
+
