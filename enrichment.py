@@ -1,4 +1,9 @@
-"""IOC Enrichment Scoring Engine — cross-references against local URLhaus + MalwareBazaar databases."""
+"""IOC Enrichment Scoring Engine — cross-references against local URLhaus + MalwareBazaar databases.
+
+Data source priority:
+1. TAXII 2.1 server (polled every 60 s on a background thread)
+2. JSONL files on disk (fallback when the server is offline)
+"""
 
 import json
 import logging
@@ -6,6 +11,8 @@ import os
 import re
 import socket
 import argparse
+import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -16,6 +23,8 @@ BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
 URLHAUS_JSONL = os.path.join(BASE_DIR, "abuse_stream.jsonl")
 MB_JSONL      = os.path.join(BASE_DIR, "malwarebazaar_recent.jsonl")
 OUTPUT_FILE   = os.path.join(BASE_DIR, "enrichment_results.jsonl")
+DEFAULT_TAXII_URL = os.getenv("TAXII_SERVER_URL", "http://localhost:6100")
+POLL_INTERVAL = 60  # seconds between TAXII polls
 
 logging.basicConfig(
     level=logging.INFO,
@@ -234,6 +243,56 @@ class _LocalIndex:
             count, len(self.mb_by_sha256), len(self.mb_by_sha1), len(self.mb_by_md5),
         )
 
+    # --- TAXII-sourced loading (same indexing logic, list-of-dicts input) --
+
+    def load_urlhaus_from_objects(self, objects: List[dict]) -> int:
+        """Index URLhaus STIX objects received from a TAXII poll."""
+        count = 0
+        for obj in objects:
+            if obj.get("type") != "indicator":
+                continue
+            pattern = obj.get("pattern", "")
+            m = _STIX_URL_RE.search(pattern)
+            if m:
+                url = m.group(1)
+                self.urlhaus_by_url[url.lower()].append(obj)
+                try:
+                    parsed = urlparse(url)
+                    hostname = parsed.hostname
+                    if hostname:
+                        if _IP_RE.match(hostname):
+                            self.urlhaus_by_ip[hostname].append(obj)
+                        else:
+                            self.urlhaus_by_domain[hostname.lower()].append(obj)
+                except Exception:
+                    pass
+                count += 1
+        self.urlhaus_count += count
+        if count:
+            log.info("Indexed %d URLhaus indicators from TAXII", count)
+        return count
+
+    def load_malwarebazaar_from_objects(self, objects: List[dict]) -> int:
+        """Index MalwareBazaar STIX objects received from a TAXII poll."""
+        count = 0
+        for obj in objects:
+            if obj.get("type") not in ("malware", "indicator"):
+                continue
+            sha256 = obj.get("x_mb_sha256", "")
+            sha1   = obj.get("x_mb_sha1", "")
+            md5    = obj.get("x_mb_md5", "")
+            if sha256:
+                self.mb_by_sha256[sha256.lower()].append(obj)
+            if sha1:
+                self.mb_by_sha1[sha1.lower()].append(obj)
+            if md5:
+                self.mb_by_md5[md5.lower()].append(obj)
+            count += 1
+        self.mb_count += count
+        if count:
+            log.info("Indexed %d MalwareBazaar objects from TAXII", count)
+        return count
+
 
 # Temporal Weighting
 
@@ -289,12 +348,116 @@ def _classify_confidence(score: float) -> Dict[str, Any]:
 # Enricher
 
 class Enricher:
-    """Loads local JSONL databases once, provides fast IOC lookups."""
+    """Loads IOC databases (TAXII or JSONL), provides fast lookups.
 
-    def __init__(self, urlhaus_path: str = URLHAUS_JSONL, mb_path: str = MB_JSONL):
+    Data-source priority:
+      1. TAXII server (if *taxii_url* is set and the server responds)
+      2. JSONL files on disk (fallback)
+
+    When TAXII is used, a daemon thread polls for new objects every
+    *poll_interval* seconds (default 60).
+    """
+
+    def __init__(
+        self,
+        urlhaus_path: str = URLHAUS_JSONL,
+        mb_path: str = MB_JSONL,
+        taxii_url: str = DEFAULT_TAXII_URL,
+        poll_interval: int = POLL_INTERVAL,
+    ):
         self.index = _LocalIndex()
-        self.index.load_urlhaus(urlhaus_path)
-        self.index.load_malwarebazaar(mb_path)
+        self._taxii_url = taxii_url
+        self._poll_interval = poll_interval
+        self._taxii_client = None
+        self._last_cursor_urlhaus: Optional[str] = None
+        self._last_cursor_mb: Optional[str] = None
+
+        # --- Initial load: prefer TAXII, fall back to JSONL ---------------
+        if taxii_url:
+            from taxii_client import TAXIIClient
+            self._taxii_client = TAXIIClient(taxii_url)
+            if self._taxii_client.is_server_alive():
+                log.info("TAXII server online — loading from %s", taxii_url)
+                self._full_load_from_taxii()
+            else:
+                log.info("TAXII server offline — loading from JSONL files")
+                self._taxii_client = None
+                self.index.load_urlhaus(urlhaus_path)
+                self.index.load_malwarebazaar(mb_path)
+        else:
+            self.index.load_urlhaus(urlhaus_path)
+            self.index.load_malwarebazaar(mb_path)
+
+        # --- Background polling thread ------------------------------------
+        if self._taxii_client:
+            t = threading.Thread(target=self._poll_loop, daemon=True)
+            t.start()
+            log.info(
+                "Background TAXII polling started (every %ds)",
+                poll_interval,
+            )
+
+    # --- TAXII helpers ----------------------------------------------------
+
+    def _full_load_from_taxii(self) -> None:
+        """Bulk-load all objects from both TAXII collections."""
+        try:
+            resp = self._taxii_client.poll("urlhaus-indicators")
+            self.index.load_urlhaus_from_objects(resp["objects"])
+            self._last_cursor_urlhaus = resp.get("date_added_last")
+        except Exception as exc:
+            log.error("Failed to load URLhaus from TAXII: %s", exc)
+
+        try:
+            resp = self._taxii_client.poll("malwarebazaar-indicators")
+            self.index.load_malwarebazaar_from_objects(resp["objects"])
+            self._last_cursor_mb = resp.get("date_added_last")
+        except Exception as exc:
+            log.error("Failed to load MalwareBazaar from TAXII: %s", exc)
+
+    def _poll_loop(self) -> None:
+        """Background thread: poll the TAXII server for new data."""
+        while True:
+            time.sleep(self._poll_interval)
+            if not self._taxii_client:
+                continue
+            try:
+                if not self._taxii_client.is_server_alive():
+                    log.debug("TAXII server unreachable during poll cycle")
+                    continue
+                self._poll_incremental()
+            except Exception as exc:
+                log.warning("TAXII poll cycle failed: %s", exc)
+
+    def _poll_incremental(self) -> None:
+        """Fetch only objects added since the last successful poll."""
+        # URLhaus
+        try:
+            resp = self._taxii_client.poll(
+                "urlhaus-indicators",
+                added_after=self._last_cursor_urlhaus,
+            )
+            new = self.index.load_urlhaus_from_objects(resp["objects"])
+            if resp.get("date_added_last"):
+                self._last_cursor_urlhaus = resp["date_added_last"]
+            if new:
+                log.info("Polled %d new URLhaus objects", new)
+        except Exception as exc:
+            log.warning("URLhaus poll failed: %s", exc)
+
+        # MalwareBazaar
+        try:
+            resp = self._taxii_client.poll(
+                "malwarebazaar-indicators",
+                added_after=self._last_cursor_mb,
+            )
+            new = self.index.load_malwarebazaar_from_objects(resp["objects"])
+            if resp.get("date_added_last"):
+                self._last_cursor_mb = resp["date_added_last"]
+            if new:
+                log.info("Polled %d new MalwareBazaar objects", new)
+        except Exception as exc:
+            log.warning("MalwareBazaar poll failed: %s", exc)
 
     def enrich(self, packet: Dict[str, Any]) -> Dict[str, Any]:
         """Enrich a single IOC packet against local databases."""
@@ -454,17 +617,17 @@ class Enricher:
 
 _shared_enricher: Optional[Enricher] = None
 
-def enrich_ioc(packet: Dict[str, Any]) -> Dict[str, Any]:
+def enrich_ioc(packet: Dict[str, Any], taxii_url: str = DEFAULT_TAXII_URL) -> Dict[str, Any]:
     """Enrich a single IOC packet. Loads indices on first call."""
     global _shared_enricher
     if _shared_enricher is None:
-        _shared_enricher = Enricher()
+        _shared_enricher = Enricher(taxii_url=taxii_url)
     return _shared_enricher.enrich(packet)
 
-def enrich_batch(packets: List[Dict[str, Any]], output_file: Optional[str] = None) -> List[Dict[str, Any]]:
+def enrich_batch(packets: List[Dict[str, Any]], output_file: Optional[str] = None, taxii_url: str = DEFAULT_TAXII_URL) -> List[Dict[str, Any]]:
     global _shared_enricher
     if _shared_enricher is None:
-        _shared_enricher = Enricher()
+        _shared_enricher = Enricher(taxii_url=taxii_url)
     return _shared_enricher.enrich_batch(packets, output_file)
 
 
@@ -507,6 +670,10 @@ def main():
     parser.add_argument("--json", action="store_true", help="Print raw JSON output")
     parser.add_argument("--urlhaus-db", default=URLHAUS_JSONL)
     parser.add_argument("--mb-db", default=MB_JSONL)
+    parser.add_argument("--taxii-url", default=DEFAULT_TAXII_URL,
+                        help="TAXII 2.1 server URL (default: %(default)s)")
+    parser.add_argument("--no-taxii", action="store_true",
+                        help="Disable TAXII and use JSONL files only")
     args = parser.parse_args()
 
     ioc_value = args.ioc_value.strip()
@@ -530,7 +697,12 @@ def main():
     else:
         packet["ioc"] = ioc_value
 
-    enricher = Enricher(urlhaus_path=args.urlhaus_db, mb_path=args.mb_db)
+    taxii_url = "" if args.no_taxii else args.taxii_url
+    enricher = Enricher(
+        urlhaus_path=args.urlhaus_db,
+        mb_path=args.mb_db,
+        taxii_url=taxii_url,
+    )
     result = enricher.enrich(packet)
     _write_results([result], args.output)
 

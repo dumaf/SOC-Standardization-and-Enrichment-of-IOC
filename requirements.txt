@@ -1,0 +1,5 @@
+flask
+flask-sqlalchemy
+stix2
+requests
+python-dotenv
