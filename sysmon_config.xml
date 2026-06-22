@@ -1,0 +1,21 @@
+<!--
+  Sysmon configuration for SOC demo.
+  Minimal config: only logs outbound network connections (Event ID 3).
+
+  Install:
+    sysmon64.exe -accepteula -i sysmon_config.xml
+
+  Update config later:
+    sysmon64.exe -c sysmon_config.xml
+-->
+<Sysmon schemaversion="4.90">
+  <EventFiltering>
+    <RuleGroup name="" groupRelation="or">
+      <NetworkConnect onmatch="exclude">
+        <!-- Exclude loopback to reduce noise -->
+        <DestinationIp condition="is">127.0.0.1</DestinationIp>
+        <DestinationIp condition="is">::1</DestinationIp>
+      </NetworkConnect>
+    </RuleGroup>
+  </EventFiltering>
+</Sysmon>
