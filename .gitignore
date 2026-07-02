@@ -8,3 +8,5 @@ results/
 *.db
 main.py
 venv/
+notes.txt
+relevant_info.txt
