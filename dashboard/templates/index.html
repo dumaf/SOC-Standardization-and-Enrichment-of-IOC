@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SOC Enrichment Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Reset & Tokens ─────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d0f14;
+      --surface:   #141720;
+      --surface2:  #1b1f2e;
+      --border:    #252a3a;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --accent:    #6366f1;
+      --accent-glow: rgba(99,102,241,0.15);
+
+      --crit:  #ef4444;
+      --high:  #f97316;
+      --med:   #eab308;
+      --low:   #3b82f6;
+      --min:   #64748b;
+
+      --crit-bg: rgba(239,68,68,0.08);
+      --high-bg: rgba(249,115,22,0.08);
+      --med-bg:  rgba(234,179,8,0.08);
+      --low-bg:  rgba(59,130,246,0.08);
+      --min-bg:  rgba(100,116,139,0.06);
+
+      --radius: 8px;
+      --transition: 0.18s ease;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Layout ─────────────────────────────────────── */
+    .shell {
+      display: grid;
+      grid-template-rows: 56px 1fr;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Top Bar ─────────────────────────────────────── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: relative;
+      z-index: 10;
+    }
+    .topbar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+    }
+    .topbar-logo svg { opacity: 0.9; }
+    .topbar-spacer { flex: 1; }
+    .topbar-feeds { display: flex; gap: 12px; align-items: center; }
+    .feed-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .feed-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--min);
+      flex-shrink: 0;
+    }
+    .feed-dot.ok { background: #22c55e; box-shadow: 0 0 6px #22c55e80; }
+    .feed-dot.warn { background: var(--med); }
+
+    .refresh-btn {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 13px;
+      font-family: inherit;
+      transition: border-color var(--transition), background var(--transition);
+    }
+    .refresh-btn:hover { border-color: var(--accent); background: var(--accent-glow); }
+    .refresh-btn.spinning svg { animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .topbar-time {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ── Main content ────────────────────────────────── */
+    .main {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      overflow: hidden;
+    }
+
+    /* ── Left column ─────────────────────────────────── */
+    .left-col {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-right: 1px solid var(--border);
+    }
+
+    /* Stat strip */
+    .stat-strip {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .stat-card {
+      flex: 1;
+      padding: 12px 16px;
+      border-right: 1px solid var(--border);
+      cursor: pointer;
+      transition: background var(--transition);
+      position: relative;
+    }
+    .stat-card:last-child { border-right: none; }
+    .stat-card:hover { background: var(--surface2); }
+    .stat-card.active::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 2px;
+    }
+    .stat-card[data-level="ALL"].active::after   { background: var(--accent); }
+    .stat-card[data-level="CRITICAL"].active::after { background: var(--crit); }
+    .stat-card[data-level="HIGH"].active::after  { background: var(--high); }
+    .stat-card[data-level="MEDIUM"].active::after{ background: var(--med); }
+    .stat-card[data-level="LOW"].active::after   { background: var(--low); }
+    .stat-card[data-level="MINIMAL"].active::after { background: var(--min); }
+
+    .stat-num {
+      font-size: 22px;
+      font-weight: 700;
+      line-height: 1;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .stat-num.crit  { color: var(--crit); }
+    .stat-num.high  { color: var(--high); }
+    .stat-num.med   { color: var(--med); }
+    .stat-num.low   { color: var(--low); }
+    .stat-num.min   { color: var(--min); }
+    .stat-label { font-size: 11px; color: var(--muted); margin-top: 3px; letter-spacing: 0.05em; text-transform: uppercase; }
+
+    /* Filter bar */
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      background: var(--surface);
+    }
+    .search-wrap {
+      flex: 1;
+      position: relative;
+    }
+    .search-wrap svg {
+      position: absolute; left: 10px; top: 50%;
+      transform: translateY(-50%);
+      color: var(--muted);
+      pointer-events: none;
+    }
+    .search-input {
+      width: 100%;
+      padding: 7px 12px 7px 34px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color var(--transition);
+    }
+    .search-input:focus { border-color: var(--accent); }
+    .search-input::placeholder { color: var(--muted); }
+
+    .filter-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .min-score-input {
+      width: 70px;
+      padding: 7px 10px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+      outline: none;
+      text-align: center;
+      transition: border-color var(--transition);
+    }
+    .min-score-input:focus { border-color: var(--accent); }
+
+    .count-badge {
+      font-size: 12px; color: var(--muted);
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    /* Alert table */
+    .alert-table-wrap {
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    thead th {
+      padding: 10px 16px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    tbody tr {
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: background var(--transition);
+    }
+    tbody tr:hover { background: var(--surface2); }
+    tbody tr.selected { background: var(--accent-glow) !important; border-left: 2px solid var(--accent); }
+    tbody td {
+      padding: 11px 16px;
+      vertical-align: middle;
+    }
+    .td-ioc {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      font-weight: 500;
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .td-type {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .score-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 52px;
+      padding: 3px 8px;
+      border-radius: 5px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .score-chip.CRITICAL { background: var(--crit-bg); color: var(--crit); border: 1px solid var(--crit); }
+    .score-chip.HIGH     { background: var(--high-bg); color: var(--high); border: 1px solid var(--high); }
+    .score-chip.MEDIUM   { background: var(--med-bg);  color: var(--med);  border: 1px solid var(--med); }
+    .score-chip.LOW      { background: var(--low-bg);  color: var(--low);  border: 1px solid var(--low); }
+    .score-chip.MINIMAL  { background: var(--min-bg);  color: var(--min);  border: 1px solid var(--border); }
+
+    .level-badge {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .level-badge.CRITICAL { color: var(--crit); background: var(--crit-bg); }
+    .level-badge.HIGH     { color: var(--high); background: var(--high-bg); }
+    .level-badge.MEDIUM   { color: var(--med);  background: var(--med-bg); }
+    .level-badge.LOW      { color: var(--low);  background: var(--low-bg); }
+    .level-badge.MINIMAL  { color: var(--min);  background: var(--min-bg); }
+
+    .td-time {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      white-space: nowrap;
+    }
+    .tag-pill {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(99,102,241,0.12);
+      color: #a5b4fc;
+      font-size: 11px;
+      margin: 1px;
+      border: 1px solid rgba(99,102,241,0.2);
+    }
+    .td-actions { white-space: nowrap; }
+    .suppress-btn {
+      font-size: 11px;
+      padding: 3px 9px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-family: inherit;
+      transition: all var(--transition);
+    }
+    .suppress-btn:hover { border-color: var(--crit); color: var(--crit); background: var(--crit-bg); }
+
+    /* Empty state */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 80px 24px;
+      gap: 12px;
+      color: var(--muted);
+    }
+    .empty-state svg { opacity: 0.3; }
+    .empty-state h3 { font-size: 16px; color: var(--text); }
+    .empty-state p  { font-size: 13px; text-align: center; }
+
+    /* Loading shimmer */
+    .shimmer-row td div {
+      height: 14px;
+      border-radius: 4px;
+      background: linear-gradient(90deg, var(--surface2) 25%, var(--border) 50%, var(--surface2) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.2s infinite;
+    }
+    @keyframes shimmer { to { background-position: -200% 0; } }
+
+    /* ── Right column — Detail Panel ──────────────────── */
+    .detail-panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--surface);
+    }
+    .detail-header {
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .detail-header h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .detail-body {
+      overflow-y: auto;
+      flex: 1;
+      padding: 0 20px 20px;
+    }
+    .detail-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 10px;
+      color: var(--muted);
+      opacity: 0.5;
+    }
+    .detail-empty svg { opacity: 0.4; }
+
+    /* Detail sections */
+    .detail-ioc-title {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 16px;
+      font-weight: 600;
+      margin-top: 20px;
+      margin-bottom: 4px;
+      word-break: break-all;
+    }
+    .detail-meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+    .score-display {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      margin-bottom: 16px;
+    }
+    .score-big {
+      font-size: 36px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      line-height: 1;
+    }
+    .score-side { flex: 1; }
+    .score-level { font-size: 13px; font-weight: 600; }
+    .score-label { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .score-temporal { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 16px 0 8px;
+    }
+    .breakdown-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .breakdown-item:last-child { border-bottom: none; }
+    .breakdown-bullet {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex-shrink: 0;
+      margin-top: 6px;
+    }
+
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .kv-item {
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      background: var(--surface2);
+      border: 1px solid var(--border);
+    }
+    .kv-key { font-size: 11px; color: var(--muted); margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .kv-val { font-size: 13px; font-weight: 500; word-break: break-word; font-family: 'JetBrains Mono', monospace; }
+    .kv-item.full { grid-column: 1 / -1; }
+
+    .tags-wrap { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 4px; }
+
+    .action-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .action-btn {
+      flex: 1;
+      padding: 9px 0;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all var(--transition);
+      font-weight: 500;
+    }
+    .action-btn.danger { border-color: rgba(239,68,68,0.3); }
+    .action-btn.danger:hover { background: var(--crit-bg); border-color: var(--crit); color: var(--crit); }
+    .action-btn.primary { border-color: rgba(99,102,241,0.3); }
+    .action-btn.primary:hover { background: var(--accent-glow); border-color: var(--accent); color: #a5b4fc; }
+
+    /* Suppressed panel */
+    .suppressed-tab {
+      padding: 10px 20px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .suppressed-toggle {
+      font-size: 12px;
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 0;
+      user-select: none;
+    }
+    .suppressed-toggle:hover { color: var(--text); }
+    .suppressed-list {
+      display: none;
+      max-height: 150px;
+      overflow-y: auto;
+      padding-top: 8px;
+    }
+    .suppressed-list.open { display: block; }
+    .suppressed-entry {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid var(--border);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .unsuppress-btn {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .unsuppress-btn:hover { border-color: #22c55e; color: #22c55e; }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 24px; right: 24px;
+      padding: 12px 20px;
+      border-radius: var(--radius);
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+      font-size: 13px;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.25s ease;
+      z-index: 100;
+      max-width: 320px;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- TOP BAR -->
+  <header class="topbar">
+    <div class="topbar-logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        <path d="m9 12 2 2 4-4"/>
+      </svg>
+      SOC Enrichment Dashboard
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-feeds" id="feedPills">
+      <div class="feed-pill"><div class="feed-dot"></div>Loading feeds…</div>
+    </div>
+    <button class="refresh-btn" id="refreshBtn" onclick="refresh()">
+      <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+      </svg>
+      Refresh
+    </button>
+    <div class="topbar-time" id="topbarTime">--:--:--</div>
+  </header>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- LEFT: Alert Table -->
+    <div class="left-col">
+
+      <!-- Stats strip -->
+      <div class="stat-strip">
+        <div class="stat-card active" data-level="ALL" onclick="filterLevel('ALL', this)">
+          <div class="stat-num" id="s-total">—</div>
+          <div class="stat-label">Total Unique IOCs</div>
+        </div>
+        <div class="stat-card" data-level="CRITICAL" onclick="filterLevel('CRITICAL', this)">
+          <div class="stat-num crit" id="s-crit">—</div>
+          <div class="stat-label">Critical</div>
+        </div>
+        <div class="stat-card" data-level="HIGH" onclick="filterLevel('HIGH', this)">
+          <div class="stat-num high" id="s-high">—</div>
+          <div class="stat-label">High</div>
+        </div>
+        <div class="stat-card" data-level="MEDIUM" onclick="filterLevel('MEDIUM', this)">
+          <div class="stat-num med" id="s-med">—</div>
+          <div class="stat-label">Medium</div>
+        </div>
+        <div class="stat-card" data-level="LOW" onclick="filterLevel('LOW', this)">
+          <div class="stat-num low" id="s-low">—</div>
+          <div class="stat-label">Low</div>
+        </div>
+        <div class="stat-card" data-level="MINIMAL" onclick="filterLevel('MINIMAL', this)">
+          <div class="stat-num min" id="s-min">—</div>
+          <div class="stat-label">Minimal</div>
+        </div>
+      </div>
+
+      <!-- Filter bar -->
+      <div class="filter-bar">
+        <div class="search-wrap">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" class="search-input" id="searchInput" placeholder="Filter by IOC value, tag, or malware…" oninput="applyLocalFilter()" />
+        </div>
+        <span class="filter-label">Min score</span>
+        <input type="number" class="min-score-input" id="minScoreInput" value="0" min="0" max="999" onchange="refresh()" />
+        <span class="count-badge" id="countBadge">—</span>
+      </div>
+
+      <!-- Table -->
+      <div class="alert-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>IOC Value</th>
+              <th>Score</th>
+              <th>Level</th>
+              <th>Tags</th>
+              <th>Seen</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="alertTableBody">
+            <tr class="shimmer-row"><td><div style="width:160px"></div></td><td><div style="width:50px"></div></td><td><div style="width:70px"></div></td><td><div style="width:100px"></div></td><td><div style="width:80px"></div></td><td><div style="width:50px"></div></td></tr>
+            <tr class="shimmer-row"><td><div style="width:200px"></div></td><td><div style="width:50px"></div></td><td><div style="width:70px"></div></td><td><div style="width:80px"></div></td><td><div style="width:80px"></div></td><td><div style="width:50px"></div></td></tr>
+            <tr class="shimmer-row"><td><div style="width:130px"></div></td><td><div style="width:50px"></div></td><td><div style="width:70px"></div></td><td><div style="width:120px"></div></td><td><div style="width:80px"></div></td><td><div style="width:50px"></div></td></tr>
+          </tbody>
+        </table>
+        <div id="emptyState" class="empty-state" style="display:none">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35M11 8v3l2 2"/></svg>
+          <h3>No alerts found</h3>
+          <p>Try lowering the minimum score or clearing the search filter.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Detail Panel -->
+    <div class="detail-panel">
+      <div class="detail-header">
+        <h2>Alert Detail</h2>
+      </div>
+      <div class="detail-body" id="detailBody">
+        <div class="detail-empty">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          <p>Select an alert to see details</p>
+        </div>
+      </div>
+
+      <!-- Suppressed IOCs -->
+      <div class="suppressed-tab" id="suppressedTab" style="display:none">
+        <div class="suppressed-toggle" onclick="toggleSuppressed()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          <span id="suppressedToggleLabel">Suppressed IOCs (0)</span>
+        </div>
+        <div class="suppressed-list" id="suppressedList"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+  // ── State ──────────────────────────────────────────
+  let allAlerts = [];
+  let filteredAlerts = [];
+  let activeLevel = 'ALL';
+  let selectedIoc = null;
+  let currentDetail = null;
+
+  // ── Utilities ──────────────────────────────────────
+  function iocKey(alert) {
+    const ioc = alert.ioc || {};
+    return ioc.url || ioc.domain || ioc.ip || ioc.sha256 || ioc.sha1 || ioc.md5 || '?';
+  }
+
+  function iocType(alert) {
+    const ioc = alert.ioc || {};
+    if (ioc.url) return 'url';
+    if (ioc.domain) return 'domain';
+    if (ioc.ip) return 'ip';
+    if (ioc.sha256) return 'sha256';
+    if (ioc.sha1) return 'sha1';
+    if (ioc.md5) return 'md5';
+    return 'unknown';
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    const diff = (Date.now() - d) / 1000;
+    if (diff < 60) return `${Math.round(diff)}s ago`;
+    if (diff < 3600) return `${Math.round(diff/60)}m ago`;
+    if (diff < 86400) return `${Math.round(diff/3600)}h ago`;
+    return `${Math.round(diff/86400)}d ago`;
+  }
+
+  function shortDate(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+  }
+
+  function toast(msg, duration=2500) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), duration);
+  }
+
+  function levelColor(level) {
+    const map = { CRITICAL:'--crit', HIGH:'--high', MEDIUM:'--med', LOW:'--low', MINIMAL:'--min' };
+    return map[level] || '--min';
+  }
+
+  // ── Clock ──────────────────────────────────────────
+  function updateClock() {
+    document.getElementById('topbarTime').textContent =
+      new Date().toLocaleTimeString([], { hour12: false });
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
+
+  // ── Load data ──────────────────────────────────────
+  async function refresh() {
+    const btn = document.getElementById('refreshBtn');
+    btn.classList.add('spinning');
+
+    const minScore = document.getElementById('minScoreInput').value || 0;
+    try {
+      const res = await fetch(`/api/alerts?min_score=${minScore}&limit=500`);
+      const data = await res.json();
+
+      allAlerts = data.alerts || [];
+      updateStats(data.stats || {});
+      updateFeeds(data.feeds || []);
+      applyLocalFilter();
+      await loadSuppressed();
+    } catch(e) {
+      toast('⚠ Could not connect to API — is app.py running?');
+    }
+    btn.classList.remove('spinning');
+  }
+
+  function updateStats(stats) {
+    document.getElementById('s-total').textContent = stats.unique_iocs_shown ?? '—';
+    document.getElementById('s-crit').textContent  = stats.critical ?? '—';
+    document.getElementById('s-high').textContent  = stats.high ?? '—';
+    document.getElementById('s-med').textContent   = stats.medium ?? '—';
+    document.getElementById('s-low').textContent   = stats.low ?? '—';
+    document.getElementById('s-min').textContent   = stats.minimal ?? '—';
+  }
+
+  function updateFeeds(feeds) {
+    const container = document.getElementById('feedPills');
+    container.innerHTML = feeds.map(f => `
+      <div class="feed-pill">
+        <div class="feed-dot ${f.healthy ? 'ok' : 'warn'}"></div>
+        ${f.name} <strong>${(f.ioc_count||0).toLocaleString()}</strong>
+        ${f.age_minutes != null ? `· ${f.age_minutes < 60 ? f.age_minutes+'m ago' : Math.round(f.age_minutes/60)+'h ago'}` : ''}
+      </div>
+    `).join('');
+  }
+
+  // ── Filtering ──────────────────────────────────────
+  function filterLevel(level, el) {
+    activeLevel = level;
+    document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+    el.classList.add('active');
+    applyLocalFilter();
+  }
+
+  function applyLocalFilter() {
+    const query = document.getElementById('searchInput').value.toLowerCase();
+
+    filteredAlerts = allAlerts.filter(a => {
+      if (activeLevel !== 'ALL' && a.confidence?.level !== activeLevel) return false;
+      if (query) {
+        const key = iocKey(a).toLowerCase();
+        const tags = (a.tags || []).join(' ').toLowerCase();
+        const sig  = (a.hits?.malwarebazaar?.signature || '').toLowerCase();
+        const breakdown = (a.scoring_breakdown || []).join(' ').toLowerCase();
+        if (!key.includes(query) && !tags.includes(query) && !sig.includes(query) && !breakdown.includes(query)) return false;
+      }
+      return true;
+    });
+
+    renderTable();
+  }
+
+  // ── Render table ───────────────────────────────────
+  function renderTable() {
+    const tbody = document.getElementById('alertTableBody');
+    const empty = document.getElementById('emptyState');
+    document.getElementById('countBadge').textContent = `${filteredAlerts.length} alerts`;
+
+    if (!filteredAlerts.length) {
+      tbody.innerHTML = '';
+      empty.style.display = 'flex';
+      return;
+    }
+    empty.style.display = 'none';
+
+    tbody.innerHTML = filteredAlerts.map((a, idx) => {
+      const key   = iocKey(a);
+      const type  = iocType(a);
+      const level = a.confidence?.level || 'MINIMAL';
+      const score = a.final_score ?? 0;
+      const tags  = (a.tags || []).slice(0, 3).map(t => `<span class="tag-pill">${t}</span>`).join('');
+      const seen  = relativeTime(a.earliest_seen);
+      const isSelected = selectedIoc === key;
+
+      return `<tr onclick="selectAlert(${idx})" class="${isSelected ? 'selected' : ''}" id="row-${idx}">
+        <td>
+          <div class="td-ioc" title="${key}">${key}</div>
+          <div class="td-type">${type}</div>
+        </td>
+        <td><span class="score-chip ${level}">${score.toFixed(0)}</span></td>
+        <td><span class="level-badge ${level}">${level}</span></td>
+        <td>${tags || '<span style="color:var(--muted);font-size:12px">—</span>'}</td>
+        <td class="td-time">${seen}</td>
+        <td class="td-actions">
+          <button class="suppress-btn" onclick="event.stopPropagation(); suppressAlert('${key}')">Suppress</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ── Alert detail ───────────────────────────────────
+  function selectAlert(idx) {
+    const alert = filteredAlerts[idx];
+    if (!alert) return;
+
+    selectedIoc = iocKey(alert);
+    currentDetail = alert;
+    renderTable(); // re-render to update selected highlight
+
+    const level  = alert.confidence?.level || 'MINIMAL';
+    const score  = alert.final_score ?? 0;
+    const raw    = alert.raw_score ?? 0;
+    const mult   = alert.temporal_multiplier ?? 1;
+    const key    = iocKey(alert);
+    const type   = iocType(alert);
+    const mb     = alert.hits?.malwarebazaar;
+    const tags   = alert.tags || [];
+    const bd     = alert.scoring_breakdown || [];
+
+    const colorVar = `var(${levelColor(level)})`;
+
+    let html = `
+      <div class="detail-ioc-title">${key}</div>
+      <div class="detail-meta">Type: ${type} · Enriched ${relativeTime(alert.enriched_at)}</div>
+
+      <div class="score-display">
+        <div class="score-big" style="color:${colorVar}">${score.toFixed(1)}</div>
+        <div class="score-side">
+          <div class="score-level" style="color:${colorVar}">${level}</div>
+          <div class="score-label">${alert.confidence?.label || ''}</div>
+          <div class="score-temporal">Raw ${raw} × ${mult}× temporal</div>
+        </div>
+      </div>
+    `;
+
+    // Scoring breakdown
+    if (bd.length) {
+      html += `<div class="section-title">Scoring Breakdown</div>`;
+      html += bd.map(line => `
+        <div class="breakdown-item">
+          <div class="breakdown-bullet"></div>
+          <span>${line}</span>
+        </div>
+      `).join('');
+    }
+
+    // Tags
+    if (tags.length) {
+      html += `<div class="section-title">Tags</div>`;
+      html += `<div class="tags-wrap">${tags.map(t => `<span class="tag-pill">${t}</span>`).join('')}</div>`;
+    }
+
+    // MalwareBazaar details
+    if (mb) {
+      html += `<div class="section-title">MalwareBazaar Match</div>`;
+      html += `<div class="kv-grid">`;
+      if (mb.signature) html += kv('Signature', mb.signature);
+      if (mb.file_type)  html += kv('File Type', mb.file_type);
+      if (mb.file_name)  html += kv('File Name', mb.file_name);
+      if (mb.delivery_method) html += kv('Delivery', mb.delivery_method);
+      if (mb.reporter)   html += kv('Reporter', mb.reporter);
+      if (mb.first_seen) html += kv('First Seen', shortDate(mb.first_seen));
+      if (mb.sha256)     html += kv('SHA-256', mb.sha256, true);
+      html += `</div>`;
+    }
+
+    // URLhaus hits summary
+    const uh = alert.hits || {};
+    const uhItems = [];
+    if (uh.urlhaus_url)    uhItems.push(`URL match (${uh.urlhaus_url.matched_count} indicators)`);
+    if (uh.urlhaus_domain) uhItems.push(`Domain match (${uh.urlhaus_domain.matched_count} indicators)`);
+    if (uh.urlhaus_ip)     uhItems.push(`IP match (${uh.urlhaus_ip.matched_count} indicators)`);
+    if (uhItems.length) {
+      html += `<div class="section-title">URLhaus Matches</div>`;
+      html += `<div class="kv-grid">` + uhItems.map(i => kv('', i)).join('') + `</div>`;
+    }
+
+    // Temporal
+    html += `<div class="section-title">Timeline</div>`;
+    html += `<div class="kv-grid">`;
+    html += kv('First Seen', alert.earliest_seen ? shortDate(alert.earliest_seen) : '—');
+    html += kv('Enriched', shortDate(alert.enriched_at));
+    html += `</div>`;
+
+    // Actions
+    html += `
+      <div class="action-row">
+        <button class="action-btn danger" onclick="suppressAlert('${key}')">Suppress IOC</button>
+        <button class="action-btn primary" onclick="copyDetail()">Copy JSON</button>
+      </div>
+    `;
+
+    document.getElementById('detailBody').innerHTML = html;
+  }
+
+  function kv(key, val, full=false) {
+    return `<div class="kv-item${full?' full':''}">
+      ${key ? `<div class="kv-key">${key}</div>` : ''}
+      <div class="kv-val">${val}</div>
+    </div>`;
+  }
+
+  function copyDetail() {
+    if (!currentDetail) return;
+    navigator.clipboard.writeText(JSON.stringify(currentDetail, null, 2))
+      .then(() => toast('✓ Copied JSON to clipboard'));
+  }
+
+  // ── Suppress / Unsuppress ─────────────────────────
+  async function suppressAlert(iocValue) {
+    try {
+      await fetch('/api/suppress', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ioc_value: iocValue })
+      });
+      if (selectedIoc === iocValue) {
+        selectedIoc = null;
+        document.getElementById('detailBody').innerHTML =
+          '<div class="detail-empty"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 6L6 18M6 6l12 12"/></svg><p>IOC suppressed</p></div>';
+      }
+      allAlerts = allAlerts.filter(a => iocKey(a) !== iocValue);
+      applyLocalFilter();
+      loadSuppressed();
+      toast(`✓ Suppressed: ${iocValue}`);
+    } catch(e) {
+      toast('⚠ Failed to suppress');
+    }
+  }
+
+  async function unsuppressAlert(iocValue) {
+    await fetch('/api/unsuppress', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ioc_value: iocValue })
+    });
+    loadSuppressed();
+    toast(`✓ Unsuppressed: ${iocValue}`);
+  }
+
+  async function loadSuppressed() {
+    try {
+      const res = await fetch('/api/suppressed');
+      const data = await res.json();
+      const list = data.suppressed || [];
+
+      const tab = document.getElementById('suppressedTab');
+      const listEl = document.getElementById('suppressedList');
+      const label = document.getElementById('suppressedToggleLabel');
+
+      label.textContent = `Suppressed IOCs (${list.length})`;
+
+      if (list.length) {
+        tab.style.display = 'block';
+        listEl.innerHTML = list.map(ioc => `
+          <div class="suppressed-entry">
+            <span title="${ioc}">${ioc.length > 35 ? ioc.slice(0,32)+'…' : ioc}</span>
+            <button class="unsuppress-btn" onclick="unsuppressAlert('${ioc}')">Restore</button>
+          </div>
+        `).join('');
+      } else {
+        tab.style.display = 'none';
+      }
+    } catch(e) {}
+  }
+
+  function toggleSuppressed() {
+    const list = document.getElementById('suppressedList');
+    list.classList.toggle('open');
+  }
+
+  // ── Init ───────────────────────────────────────────
+  refresh();
+  setInterval(refresh, 30000); // auto-refresh every 30s
+</script>
+</body>
+</html>
