@@ -46,6 +46,11 @@ def extract_ioc(alert: dict) -> Optional[dict]:
     rule  = alert.get("rule", {})
     agent = alert.get("agent", {})
 
+    # Whitelist Python processes to prevent self-enrichment loops (e.g., from enrichment.py DNS lookups)
+    image = data.get("win", {}).get("eventdata", {}).get("image", "").lower()
+    if "python" in image:
+        return None
+
     ioc      = None
     ioc_type = None
 
@@ -95,16 +100,25 @@ def extract_ioc(alert: dict) -> Optional[dict]:
                 ioc = val
                 break
 
-    # 4. Domain from DNS query fields
+    # 4. Domain from DNS query fields (including Sysmon Event 22)
     if not ioc:
-        dns_name = (
-            data.get("dns", {})
-                .get("question", {})
-                .get("name", "")
+        sysmon_query = (
+            data.get("win", {})
+                .get("eventdata", {})
+                .get("queryName", "")
                 .strip()
         )
-        if dns_name:
-            ioc, ioc_type = dns_name, "domain"
+        if sysmon_query:
+            ioc, ioc_type = sysmon_query, "domain"
+        else:
+            dns_name = (
+                data.get("dns", {})
+                    .get("question", {})
+                    .get("name", "")
+                    .strip()
+            )
+            if dns_name:
+                ioc, ioc_type = dns_name, "domain"
 
     if not ioc:
         return None      # nothing enrichable in this alert, skip silently

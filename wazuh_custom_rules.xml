@@ -1,9 +1,19 @@
 <group name="sysmon_network,">
 
-  <rule id="100020" level="5">
+  <!-- Layer 1: IP-based detection via URLhaus CDB (Sysmon Event 3) -->
+  <rule id="100020" level="10">
     <if_sid>61605</if_sid>
-    <description>SOC Demo: Sysmon Outbound Connection (Event 3)</description>
-    <group>sysmon_event3,network,</group>
+    <list field="win.eventdata.destinationIp" lookup="match_key">etc/lists/urlhaus-ips</list>
+    <description>CTI Match: Outbound connection to URLhaus-listed IP $(win.eventdata.destinationIp)</description>
+    <group>sysmon_event3,network,threat_intel,</group>
+  </rule>
+
+  <!-- Layer 1: Domain-based detection via URLhaus CDB (Sysmon Event 22 DNS) -->
+  <rule id="100021" level="10">
+    <if_sid>61650</if_sid>
+    <list field="win.eventdata.queryName" lookup="match_key">etc/lists/urlhaus-domains</list>
+    <description>CTI Match: DNS query to URLhaus-listed domain $(win.eventdata.queryName)</description>
+    <group>sysmon_event22,network,threat_intel,</group>
   </rule>
 
 </group>

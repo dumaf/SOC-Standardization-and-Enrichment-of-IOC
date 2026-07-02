@@ -1,0 +1,30 @@
+Ran command: `git commit -m "feat: add barebones wazuh integration configs and scripts"`
+Ran command: `git push -u origin barebones_wazuh_integration`
+
+You will not lose your custom local docker config. Your local files inside `wazuh-docker/` will remain completely intact on your machine. 
+
+If you decide to track those files later, you can do so easily by:
+1. Deleting the hidden `.git` folder inside `wazuh-docker/`
+2. Running:
+   ```bash
+   git rm --cached wazuh-docker
+   git add wazuh-docker
+   git commit -m "Track wazuh-docker files directly"
+   git push
+   ```
+
+### Status Update:
+* **Current local branch**: Checked out and committed to `barebones_wazuh_integration`.
+* **Push status**: Successfully pushed the commit to GitHub under the new remote branch: **`barebones_wazuh_integration`**.
+* **Committed files**:
+  * `.gitignore` (modified)
+  * `CONTEXT.md`
+  * `generate_test_alerts.ps1`
+  * `ossec.conf`
+  * `sysmon_config.xml`
+  * `sysmon_implementation.md`
+  * `sysmon_rules_dump.xml`
+  * `wazuh-docker` (as a gitlink / nested repository pointer)
+  * `wazuh_custom_decoder.xml`
+  * `wazuh_custom_rules.xml`
+  * `wazuh_n8n_integration.py`
