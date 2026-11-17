@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from stix2 import Indicator
 
 from taxii_client import TAXIIClient
+from update_cdb import update_cdb
 
 load_dotenv()
 
@@ -126,6 +127,12 @@ def main():
                         )
                     except Exception as e:
                         print(f"[!] TAXII push failed (data safe in JSONL): {e}")
+
+                # Update CDB lists in Wazuh
+                try:
+                    update_cdb()
+                except Exception as e:
+                    print(f"[!] CDB update failed: {e}")
             else:
                 print("[-] No new data")
         except Exception as e:

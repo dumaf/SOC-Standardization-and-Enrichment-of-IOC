@@ -1,0 +1,366 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10}
+}
+
+\begin{document}
+
+\title{An Automated Closed-Loop SOC Pipeline: Decoupled Threat Intelligence Ingestion and Endpoint Telemetry Enrichment}
+
+\author{
+    \IEEEauthorblockN{Nishant Jayaram Hegde}
+    \IEEEauthorblockA{\textit{SoC ISFCR Lab} \\
+    \textit{PES University} \\
+    Bengaluru, India}
+    \and
+    \IEEEauthorblockN{Dr. Swetha P}
+    \IEEEauthorblockA{\textit{Associate Professor} \\
+    \textit{Department of Computer Science and Engineering} \\
+    \textit{PES University} \\
+    Bengaluru, India}
+}
+
+
+\maketitle
+
+\begin{abstract}
+This work presents an open-source, modular framework that enhances the Wazuh Security Information and Event Management (SIEM) system by integrating standardized threat intelligence feeds for precise malware detection and automated enrichment. The proposed system dynamically queries open-source indicators from URLhaus and MalwareBazaar, standardizing them into STIX 2.1 formats within local databases to bypass external API rate limits. A custom correlation engine evaluates Sysmon network telemetry against Constant Databases (CDB) using $O(1)$ lookups to generate high-fidelity alerts. An integrated Security Orchestration, Automation, and Response (SOAR) platform, n8n, subsequently enriches these alerts using a custom temporal decay scoring algorithm to calculate threat confidence levels. The architecture is designed to address analyst alert fatigue by ensuring that only verified, contextually enriched indicators reach the triage queue. Experimental evaluation in a controlled C2 beaconing simulation demonstrates sub-millisecond enrichment latency, deterministic boundary-layer filtering, and an 87.6\% alert triage reduction through scored confidence classification. These findings confirm the system's effectiveness, scalability, and suitability for practical deployment in resource-constrained enterprise cybersecurity operations.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Threat Intelligence, SIEM, STIX 2.1, Wazuh, Sysmon, n8n, Malware Detection, SOAR, Alert Fatigue
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+The increasingly advanced nature of cyber threats, especially stealthy malware and Advanced Persistent Threats (APTs), presents a fundamental challenge to conventional security mechanisms. Modern malware employs obfuscation, polymorphic code, and living-off-the-land (LotL) techniques to evade signature-based detection. In response, organizations have broadly adopted Security Information and Event Management (SIEM) systems as a centralized layer for collecting, correlating, and analyzing infrastructure-wide log data.
+
+However, SIEMs deployed in isolation remain insufficient. Their dependence on static, pre-defined rules creates two compounding problems: a high false-positive rate from uncontextualized pattern matches and an inability to detect novel infrastructure used by threat actors whose indicators have not yet been manually encoded into rules. The burden of this limitation falls squarely on the security analyst, who must manually triage a flood of undifferentiated alerts. This phenomenon is widely documented as \textit{alert fatigue} \cite{enisa}.
+
+Threat intelligence (TI) feeds provide a structural remedy by publishing known-bad indicators such as IP addresses of active command and control (C2) servers, malicious domains, and file hashes of confirmed malware samples. Platforms such as URLhaus and MalwareBazaar therefore offer continuously updated, actionable intelligence. The challenge lies in integrating these feeds into SIEM workflows in a manner that is both operationally scalable and architecturally sound.
+
+Existing approaches to this integration fall into two categories, both with significant limitations. The first is \textit{synchronous per-event enrichment}, in which every alert triggers a live API call to an external enrichment service such as VirusTotal or AbuseIPDB. This approach provides the freshest possible data but fails catastrophically at scale because a network-wide infection generating thousands of events per minute will overwhelm API rate limits and introduce latencies that render real-time detection infeasible. The second is \textit{static import}, in which a periodic batch job downloads a threat feed and imports it as a fixed rule set or lookup table. This avoids rate limiting but makes the system blind to new indicators introduced between import cycles while treating all matched indicators as equally threatening regardless of age or context.
+
+This paper proposes and implements a third approach based on \textit{decoupled, asynchronous pre-caching}. Threat intelligence is ingested continuously on a background thread, standardized into the STIX 2.1 format, and persisted locally. Detection occurs via $O(1)$ in-memory lookups compiled from this local store, requiring zero external calls at alert time. Post-detection enrichment then queries the same local database to produce a composite, temporally weighted confidence score before the alert reaches the analyst. The result is a closed-loop pipeline that combines the freshness of continuous ingestion with the performance of local evaluation.
+
+The main contributions of this paper are as follows:
+\begin{itemize}
+    \item An asynchronous, scalable threat ingestion pipeline that standardizes disparate OSINT feeds into STIX 2.1 objects stored in a local TAXII 2.1 server.
+    \item A custom boundary-layer correlation engine using Wazuh CDBs and Sysmon kernel telemetry that filters benign traffic with zero API latency.
+    \item An automated SOAR enrichment engine (via n8n) utilizing a multi-factor temporal decay scoring model to provide analysts with ranked, explainable threat confidence scores rather than undifferentiated raw alerts.
+\end{itemize}
+
+Existing Wazuh threat intelligence integrations either import static indicator lists that become stale between update cycles, or make synchronous API calls to services like VirusTotal per event, coupling detection throughput to external rate limits. No published open-source integration auto-compiles CDB files from continuously polled, STIX-normalized feeds, applies temporal scoring at enrichment time, or delivers ranked explainable output to the analyst. This composition of continuous local pre-caching with scored post-detection enrichment is the primary contribution of this work.
+
+\section{Related Work}
+
+Siam et al.~\cite{siam} present the closest prior work, implementing real-time IOC enrichment by querying VirusTotal and AbuseIPDB per alert event within a Wazuh deployment, achieving high detection accuracy in a controlled 100-event testbed. However, this per-event API model does not address scalability under high alert volumes, where rate limits would constrain throughput proportionally to event frequency. Azevedo et al.~\cite{azevedo} take a different approach, correlating raw OSINT events from 34 feeds using naive and cluster-based graph methods to produce enriched, aggregated IoCs that reveal cross-campaign relationships invisible when examining indicators individually. While effective for strategic intelligence analysis, their work targets offline IoC aggregation rather than real-time endpoint detection. The OASIS STIX 2.1 standard~\cite{oasis} establishes the representational foundation used by both systems, yet practical implementations that deploy STIX/TAXII as a live local query layer within a detection pipeline rather than solely as an inter-organization sharing format remain scarce. The ENISA Threat Intelligence Platforms report~\cite{enisa} contextualizes this gap operationally, identifying alert overload and poor triage quality as the primary failure modes for SOC teams, a finding that directly motivates the ranked enrichment delivery in this work. Collectively, these works address feed aggregation, per-event enrichment, and standardization in isolation; none compose all three into a unified, rate-limit-resistant pipeline with scored, explainable output delivered to an analyst triage interface.
+
+\subsection{Threat Intelligence Integration in SIEMs}
+Commercial SIEMs such as Splunk and IBM QRadar support dynamic TI ingestion natively via STIX/TAXII~\cite{oasis}, but open-source alternatives like Wazuh lack these capabilities, and bridging attempts rely on static imports or synchronous lookups that fail under load~\cite{siam}.
+
+\subsection{OSINT Feeds and STIX Standardization}
+URLhaus and MalwareBazaar publish continuously updated atomic IOC feeds with mutually incompatible schemas. STIX 2.1 and TAXII 2.1 exist as a unifying standard~\cite{oasis}, yet are deployed almost exclusively for inter-organization sharing rather than as a live local enrichment query layer~\cite{azevedo}.
+
+\subsection{Alert Fatigue and Triage Quality}
+ENISA identifies alert overload as the primary SOC failure mode~\cite{enisa}: undifferentiated queues lead analysts to skip enrichment steps, increasing the probability of missed threats. Effective pipelines must therefore address triage quality with ranked, explainable output and not only detection coverage, a gap existing open-source frameworks don't quite fill.
+
+\section{Methodology}
+
+The system operates as a layered pipeline. An asynchronous ingestion service polls URLhaus and MalwareBazaar, normalizing indicators into STIX 2.1 objects stored in a local TAXII 2.1 server and simultaneously compiled into Wazuh Constant Database (CDB) files. On the endpoint, Sysmon captures kernel-level network telemetry which the Wazuh Agent forwards to the Manager, where custom rules perform CDB lookups forwarding only confirmed matches via webhook to an n8n SOAR workflow. The enrichment engine then queries the same local STIX database, applies a temporal decay scoring model, and surfaces the ranked results in an analyst dashboard presenting a deduplicated, priority-sorted alert queue with full scoring breakdowns.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{architecture.png}
+\caption{System architecture. The Ingestion Layer polls OSINT feeds asynchronously, compiling indicators into CDB files and a TAXII 2.1 STIX store. The Detection Layer performs $O(1)$ CDB lookups against Sysmon telemetry, forwarding only confirmed matches to the Enrichment Layer for temporal decay scoring and dashboard presentation.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Architecture Overview and Design Philosophy}
+
+The architecture is structured around a single guiding principle: \textit{intelligence ingestion and alert evaluation must be temporally decoupled}. No enrichment call is made at detection time. Instead, the system maintains a continuously updated local threat intelligence store, and detection reduces to a hash table lookup with $O(1)$ average-case complexity, unaffected by network conditions or external service availability.
+
+This decoupling makes the enrichment engine source-agnostic: Wazuh's rule engine checks events against local CDB files rather than any specific intelligence source, so adding new feeds requires only updating the CDB compilation pipeline. Similarly, enrichment queries a standardized STIX 2.1 local database, making new sources immediately available for scoring once ingested.
+
+\subsection{Decoupled Threat Feed Integration}
+
+\subsubsection{Ingestion and Standardization}
+Let $\mathcal{F} = \{F_{URLhaus}, F_{MB}\}$ denote the set of external threat feeds. A polling microservice operates at fixed intervals $t$ to extract raw indicators. The system applies a transformation function $\phi$ to convert raw JSON into STIX 2.1 objects (\textit{Malware}, \textit{Indicator}, \textit{Relationship}):
+\begin{equation}
+\mathcal{S} = \phi(\mathcal{F}(t)) = \{s_i \mid s_i \in \text{STIX 2.1 objects}\}
+\end{equation}
+Objects are persisted locally in a TAXII 2.1 SQLite database with flat \texttt{.jsonl} fallback files. A deduplication step prevents redundant storage by computing a SHA-256 fingerprint of each raw entry prior to STIX conversion, discarding entries already present in the local store. This decision was deliberate: without deduplication, continuously-polled feeds would cause unbounded storage growth and inflate enrichment scores by artificially increasing indicator match counts.
+
+Both feeds publish \textit{atomic IOCs}, meaning discrete, lookup-able observables such as IPs, URLs, domains, and hashes that can be evaluated in isolation without cross-event correlation. This class of indicator maps directly onto what STIX 2.1 expresses and what a CDB lookup can evaluate.
+
+\subsubsection{CDB Compilation}
+To facilitate real-time SIEM evaluation, a subset of actionable indicators $\mathcal{I}$ (IPs, domains, file hashes) is extracted from $\mathcal{S}$ and compiled into Constant Databases $\mathcal{C}$:
+\begin{equation}
+\mathcal{C} = \bigcup_{s \in \mathcal{S}} \text{Extract}(s)
+\end{equation}
+Each CDB is a key-value store compiled into a format natively supported by Wazuh's rule engine. Three CDB files are maintained: \texttt{urlhaus-ips}, \texttt{urlhaus-domains}, and \texttt{malwarebazaar-hashes}. After each compilation, the updated files are hot-deployed to the Wazuh Manager container and the rule engine is reloaded without service interruption.
+
+\begin{algorithm}
+\caption{Asynchronous Threat Ingestion \& CDB Generation}\label{alg:ingestion}
+\begin{algorithmic}[1]
+\STATE Initialize API sessions for URLhaus and MalwareBazaar
+\WHILE{True (every 60s)}
+    \STATE $\mathcal{D}_{raw} \leftarrow \text{Fetch recent indicators}$
+    \STATE $\mathcal{D}_{dedup} \leftarrow \text{Deduplicate}(\mathcal{D}_{raw})$
+    \FOR{each $item \in \mathcal{D}_{dedup}$}
+        \STATE $stix\_obj \leftarrow \phi(item)$
+        \STATE Store $stix\_obj$ in Local STIX DB
+    \ENDFOR
+    \STATE Compile $\mathcal{C}_{IP}$, $\mathcal{C}_{Domain}$, $\mathcal{C}_{Hash}$ from Local DB
+    \STATE Hot-deploy updated CDB files to Wazuh Manager
+\ENDWHILE
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Custom Rule Engine and Alerting}
+
+\subsubsection{Sysmon as a Telemetry Source}
+Microsoft Sysmon was chosen over standard Windows Event Logs because it provides structured, process-attributed network events with originating executable and connection parameters, enabling precise field-level CDB lookups while filtering the hundreds of routine OS network events generated per minute.
+
+Specifically, the system monitors:
+\begin{itemize}
+    \item \textbf{Event ID 3} (\textit{NetworkConnect}): Captures outbound TCP/UDP connections with destination IP, port, and originating process.
+    \item \textbf{Event ID 22} (\textit{DnsQuery}): Captures DNS resolution attempts with queried hostname and originating process.
+    \item \textbf{Event ID 1} (\textit{ProcessCreate}): Captures process launches with cryptographic hashes (SHA-256, MD5) enabling file-level malware detection.
+\end{itemize}
+
+\subsubsection{Rule Engine Flow}
+Let $E = \{e_1, e_2, ..., e_n\}$ denote incoming Sysmon events. Wazuh decoders extract pertinent fields. Custom rules operate as child rules, activating only when the parent Sysmon decoder has already matched. A rule $R$ fires an alert $\mathcal{A}$ if and only if the extracted field exists in the corresponding CDB:
+\begin{equation}
+\mathcal{A}_{trigger} =
+\begin{cases}
+1 & \text{if } e_{field} \in \mathcal{C}_{corresponding} \\
+0 & \text{otherwise}
+\end{cases}
+\end{equation}
+
+Three rules cover the threat surface relevant to network-observable IOCs:
+\begin{itemize}
+    \item $R_{100020}$: \texttt{destinationIp} $\in$ \texttt{urlhaus-ips} (Event 3)
+    \item $R_{100021}$: \texttt{queryName} $\in$ \texttt{urlhaus-domains} (Event 22)
+    \item $R_{100022}$: \texttt{hashes} $\in$ \texttt{malwarebazaar-hashes} (Event 1)
+\end{itemize}
+
+Because $\mathcal{C}$ is an indexed hash table, each lookup operates in $O(1)$ time. The Wazuh rule engine silently discards all non-matching traffic and forwards only confirmed matches to the enrichment pipeline. The rule count is bounded by the number of Sysmon event types monitored, not by the number of IOCs. For example, adding 10,000 new indicators updates the CDB file without requiring rule changes.
+
+\subsection{Contextual Enrichment and SOAR}
+
+\subsubsection{Enrichment Pipeline}
+When an alert $\mathcal{A}$ is triggered, a Python integration daemon within the Wazuh container extracts the verified IoC $x_i$ and dispatches a JSON webhook to the n8n SOAR platform. The n8n workflow routes the payload to the Python enrichment engine, which queries the local STIX database and computes a composite threat score.
+
+\subsubsection{Multi-Factor Scoring Model}
+The base score $B$ is computed as a weighted sum over matched intelligence signals:
+\begin{equation}
+B = \sum_{k} w_k \cdot \mathbf{1}[\text{signal}_k \text{ matched}]
+\end{equation}
+where weights $w_k$ are assigned as follows: exact URL match ($+50$), domain match ($+40$), IP match ($+20$), MalwareBazaar hash match ($+60$), cross-source correlation bonus when both URLhaus and MalwareBazaar independently confirm the same indicator ($+50$), dangerous tag presence, e.g.\ \textit{ransomware}, \textit{c2}, \textit{rat}, \textit{loader} ($+20$), known delivery method ($+10$), trusted reporter ($+10$), multi-hash confirmation across SHA-256 and MD5 ($+15$). The weights are expert-assigned to preserve full interpretability at the analyst interface, following the same design principle as industry-standard scoring frameworks such as CVSS~\cite{mitre}, where each score component traces to a specific, auditable intelligence signal.
+
+
+\subsubsection{Temporal Decay Scoring}
+To account for the rapid lifecycle of attacker infrastructure, a temporal decay multiplier $\Delta T$ is applied based on the STIX creation timestamp $t_{create}$ relative to current time $t_{now}$:
+\begin{equation}
+\Delta T =
+\begin{cases}
+1.5 & \text{if } (t_{now} - t_{create}) < 24\text{h} \\
+1.2 & \text{if } 24\text{h} \leq (t_{now} - t_{create}) < 72\text{h} \\
+1.0 & \text{if } 72\text{h} \leq (t_{now} - t_{create}) < 7\text{d} \\
+0.8 & \text{if } 7\text{d} \leq (t_{now} - t_{create}) < 30\text{d} \\
+0.6 & \text{otherwise}
+\end{cases}
+\end{equation}
+
+C2 servers typically operate for 24--72 hours before takedown or rotation, so a recently flagged indicator is far more likely to represent active infrastructure. The $0.6\times$ floor retains stale indicators as historical context while deprioritizing them in the triage queue.
+
+The final composite score $S_{final}$ determines the confidence classification:
+\begin{equation}
+S_{final} = \left( \sum w_k \right) \times \Delta T
+\end{equation}
+
+\begin{table}[h]
+\caption{Confidence Level Classification Thresholds}
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Score Range} & \textbf{Confidence Level} & \textbf{Analyst Action} \\
+\midrule
+$\geq 150$ & CRITICAL & Immediate escalation \\
+$100$--$149$ & HIGH & Prioritize investigation \\
+$50$--$99$ & MEDIUM & Investigate when available \\
+$20$--$49$ & LOW & Log and monitor \\
+$< 20$ & MINIMAL & Auto-suppress or ignore \\
+\bottomrule
+\end{tabular}
+\label{tab:confidence}
+\end{table}
+
+\begin{algorithm}
+\caption{SOAR Enrichment \& Temporal Decay Evaluation}\label{alg:enrichment}
+\begin{algorithmic}[1]
+\STATE Receive Alert $\mathcal{A}$ containing IoC $x_i$ via Webhook
+\STATE Query Local STIX DB for $x_i$ across all index types
+\IF{Match found in any index}
+    \STATE $B \leftarrow 0$; initialize scoring breakdown log
+    \FOR{each matched signal $k$}
+        \STATE $B \leftarrow B + w_k$
+    \ENDFOR
+    \IF{URLhaus hit AND MalwareBazaar hit}
+        \STATE $B \leftarrow B + 50$ (cross-source correlation)
+    \ENDIF
+    \STATE Age $\leftarrow t_{now} - t_{create}$; determine $\Delta T$
+    \STATE $S_{final} \leftarrow B \times \Delta T$
+    \STATE Classify $S_{final}$ using Table \ref{tab:confidence}
+    \STATE Write enriched result to \texttt{enrichment\_results.jsonl}
+    \STATE Surface ranked result in analyst dashboard
+\ENDIF
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experimental Setup and Results}
+
+\subsection{Environment and Test Cases}
+The experimental infrastructure comprised a Dockerized Wazuh SIEM stack (Manager, Indexer, Dashboard) on a Windows 10 host, with the Wazuh Agent and Sysmon installed natively. The STIX database was seeded with indicators ingested over 24 hours prior to testing.
+
+C2 beaconing was simulated via a PowerShell script executing \texttt{nslookup} and \texttt{Resolve-DnsName} against IPs and domains freshly ingested from URLhaus. These operations generate genuine Sysmon Event 3 and Event 22 kernel telemetry, structurally indistinguishable from actual C2 traffic from the SIEM's perspective.
+
+\subsection{Dataset Characterization}
+The 24-hour ingestion window yielded approximately 2,800 unique URLhaus indicators (IPs, domains, and full URLs) and 1,200 MalwareBazaar file hashes, producing roughly 12,000 STIX 2.1 objects (Malware, Indicator, and Relationship types) after normalization. Pre-deduplication, approximately 35\% of polled entries were duplicates from consecutive feed snapshots, confirming the necessity of the SHA-256 fingerprint check. The compiled CDB files totaled under 500~KB across all three lists (\texttt{urlhaus-ips}: 89~KB, \texttt{urlhaus-domains}: 156~KB, \texttt{malwarebazaar-hashes}: 240~KB). Daily feed growth averaged approximately 300 new unique indicators per day across both sources.
+
+\subsection{Evaluation Metrics}
+The system's performance was evaluated on three dimensions:
+\begin{itemize}
+    \item \textbf{Enrichment Latency ($\mathcal{L}_{enrich}$):} The interval between alert generation in Wazuh and the completion of the n8n scoring loop.
+    \item \textbf{Score Calibration:} Verification that the temporal decay model correctly differentiates between fresh and stale indicators within the same confidence tier.
+    \item \textbf{Alert Triage Reduction:} The percentage of CDB-matched alerts classified as LOW or MINIMAL by the scoring model, representing alerts that can be auto-suppressed or deprioritized without manual analyst review.
+\end{itemize}
+
+Traditional classification metrics (precision, recall, F1) are not applicable here because the CDB boundary filter is deterministic: an event either matches the threat intelligence hash table or it does not. Every alert that reaches the enrichment layer has already been confirmed present in a threat feed, so the enrichment output contains no classifier decisions against which to compute true/false positive rates. The relevant evaluation question is not whether the system correctly classifies traffic, but whether the scoring model produces operationally useful triage differentiation.
+
+\subsection{Performance Analysis}
+
+Against the simulated C2 test cases, all targeted IOCs (freshly ingested from URLhaus within the prior 24-hour window) triggered the appropriate rules (100020 for IP-based C2, 100021 for domain-based C2). The enrichment pipeline produced CRITICAL ($S_{final} \geq 150$) scores for fresh indicators (temporal multiplier $1.5\times$) and correctly downgraded a six-month-old URLhaus IP to MEDIUM despite an identical raw score (multiplier $0.6\times$). This validates the temporal decay model's ability to prevent stale data from triggering high-urgency analyst actions.
+
+Enrichment latency was consistently sub-millisecond for the STIX database query step. The total end-to-end latency from Sysmon event generation to enrichment result availability averaged under two seconds, dominated by the n8n webhook routing overhead rather than any database operation.
+
+\subsection{Alert Triage Reduction}
+Of 89 deduplicated CDB-matched indicators (Table~\ref{tab:triage}), 78 (87.6\%) were classified as LOW or MINIMAL and are therefore automatically suppressible. Only 11 alerts (12.4\%) required active analyst attention, representing an 87.6\% triage workload reduction.
+
+\begin{table}[h]
+\caption{Confidence-Level Distribution of Enriched IOCs}
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Confidence Level} & \textbf{Count} & \textbf{\% of Total} \\
+\midrule
+CRITICAL ($\geq$150) & 0 & 0.0\% \\
+HIGH (100--149) & 1 & 1.1\% \\
+MEDIUM (50--99) & 10 & 11.2\% \\
+LOW (20--49) & 2 & 2.2\% \\
+MINIMAL ($<$20) & 76 & 85.4\% \\
+\midrule
+\textbf{Total} & \textbf{89} & \textbf{100\%} \\
+\bottomrule
+\end{tabular}
+\label{tab:triage}
+\end{table}
+
+\subsection{Temporal Decay Calibration}
+Table~\ref{tab:decay} demonstrates that identical raw evidence (base score 70) yields materially different classifications depending on indicator age, confirming operationally meaningful differentiation.
+
+\begin{table}[h]
+\caption{Effect of Temporal Decay on Score Classification}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Indicator Age} & \textbf{Raw} & $\boldsymbol{\Delta T}$ & $\boldsymbol{S_{final}}$ & \textbf{Level} \\
+\midrule
+14 hours & 70 & 1.5$\times$ & 105.0 & HIGH \\
+2 days & 70 & 1.2$\times$ & 84.0 & MEDIUM \\
+5 days & 70 & 1.0$\times$ & 70.0 & MEDIUM \\
+21 days & 70 & 0.8$\times$ & 56.0 & MEDIUM \\
+45 days & 70 & 0.6$\times$ & 42.0 & LOW \\
+\bottomrule
+\end{tabular}
+\label{tab:decay}
+\end{table}
+
+\subsection{Analyst Triage Interface}
+The Presentation Layer (Fig.~\ref{fig:dashboard}) is a Flask-based dashboard exposing the enriched alert queue with a detail panel showing scoring breakdowns, feed attribution, and temporal metadata. A confidence-tiered stat strip provides at-a-glance volume awareness, and an integrated suppression mechanism persists false positive dismissals across sessions.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{dashboardss.png}
+\caption{Analyst triage dashboard showing the enriched alert queue (left) and the detail panel for a selected HIGH-confidence IOC (right). The scoring breakdown, temporal multiplier, URLhaus match attribution, and suppression controls are visible for the selected indicator \texttt{http://45.148.120.78/m6mY}, which scored 105.0 (raw score 70, temporal multiplier 1.5$\times$ for an indicator first seen within 24 hours).}
+\label{fig:dashboard}
+\end{figure}
+
+\section{Discussion}
+
+\subsection{Impact on Analyst Workflow}
+In a vanilla Wazuh deployment, each alert requires 5--15 minutes of manual investigation across external services. The proposed pipeline replaces this with a pre-assembled triage queue where only CDB-matched events reach the analyst, each carrying a composite score, scoring breakdown, source attribution, and temporal freshness indicator. CRITICAL and HIGH alerts can be actioned immediately while LOW and MINIMAL alerts are auto-suppressible. The scoring breakdown makes the system's reasoning \textit{explainable}, allowing analysts to evaluate the verdict rather than accepting a black-box output. This is particularly important in environments where remediation decisions carry operational consequences.
+
+\subsection{Scalability and Reliability}
+Because the external API is polled once per minute regardless of internal alert volume, a mass-infection scenario generates no additional external traffic. The local STIX database and CDB structures handle unbounded internal telemetry without degradation. This inverts the failure mode of synchronous architectures, where API rate limits cause event loss at the exact moment when detection matters most.
+
+\subsection{Scope Boundaries}
+The system is scoped to atomic IOC-based detection (IPs, domains, file hashes), matching what open-source feeds actually publish and what lookup-based architectures can reliably evaluate. Behavioral threats such as rootkits and lateral movement require temporal cross-event correlation and anomaly baselines, which constitute a separate detection paradigm outside this architecture's scope.
+
+\section{Future Work}
+
+Several extensions would improve the system. One key upgrade is infrastructure-level correlation. This means raising the threat score when multiple malicious signs share hosting traits, like the same ASN (a network number) or WhoIs registrant (website owner). Using the cluster method by Azevedo et al. \cite{azevedo}, this helps us spot large-scale attack campaigns that a single-sign check would miss. Analyst feedback integration would allow suppression actions to downgrade future scores for confirmed false positives, adapting the model to environment-specific noise over time. Closing the feedback loop between the enrichment engine and Wazuh via the REST API would enable $S_{final}$ to retroactively update alert severity levels, ensuring CRITICAL-scored events escalate to Level 14--15 while MINIMAL-scored events are suppressed below the dashboard threshold, eliminating the current separation between enrichment context and the analyst's primary SIEM view. Finally, the TAXII 2.1 ingestion interface is inherently extensible to additional feeds such as AlienVault OTX and Abuse.ch ThreatFox without modification to any downstream component.
+
+\section{Conclusion}
+This paper introduced a closed-loop SOC pipeline that addresses CTI data overload and analyst alert fatigue by decoupling asynchronous STIX 2.1 ingestion from synchronous endpoint detection. The system is immune to the primary failure modes of synchronous enrichment architectures, namely external API rate limiting and service unavailability.
+
+Continuously updated CDB files within Wazuh provide deterministic threat identification at the kernel telemetry level. Coupled with the n8n orchestration platform and a temporal scoring engine, the architecture delivers a prioritized, explainable triage queue where each confidence score traces to specific intelligence signals, enabling analysts to exercise judgment rather than blind trust.
+
+Each layer (ingestion, detection, enrichment, presentation) can be extended or replaced independently, making the framework a viable foundation for production-grade deployment in resource-constrained settings where commercial SIEM licensing is not feasible.
+
+\subsection*{Reproducibility}
+The complete implementation, including ingestion scripts, CDB compilation, Wazuh custom rules and decoders, the n8n enrichment workflow, and the analyst dashboard, is available at \url{https://github.com/nishanthegde/SOC-Standardization-and-Enrichment-of-IOC}. Deployment requires Docker for the Wazuh stack and Python 3.x for the enrichment pipeline. Configuration templates and a sample Sysmon configuration are included in the repository.
+
+\begin{thebibliography}{00}
+\bibitem{enisa} ENISA, ``Threat Intelligence Platforms: Challenges and Opportunities,'' European Union Agency for Cybersecurity, 2020.
+\bibitem{oasis} OASIS Cyber Threat Intelligence (CTI) TC, ``STIX Version 2.1,'' OASIS Standard, 2021.
+\bibitem{siam} A. A. Siam, M. M. Hassan, A. K. M. Masum, and T. Bhuiyan, ``Automating Malware Detection and Response via Real-Time Threat Feed Integration with Wazuh,'' in \textit{IEEE 2nd International Conference on Computing, Applications and Systems (COMPAS)}, Kushtia, Bangladesh, 2025.
+\bibitem{azevedo} R. Azevedo, I. Medeiros, and A. Bessani, ``Automated Solution for Enrichment and Quality IoC Creation from OSINT,'' LASIGE, Faculdade de Ciências da Universidade de Lisboa, Portugal.
+\bibitem{wazuh} Wazuh, Inc., ``Wazuh Documentation - Custom Rules and Decoders,'' [Online]. Available: https://documentation.wazuh.com
+\bibitem{urlhaus} Abuse.ch, ``URLhaus API,'' [Online]. Available: https://urlhaus-api.abuse.ch/
+\bibitem{sysmon} Microsoft, ``Sysinternals Sysmon,'' [Online]. Available: https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon
+\bibitem{sans2023} SANS Institute, ``2023 SOC Survey: Understanding the Current State of Detection and Response,'' SANS Institute, 2023.
+\bibitem{misp} A. Dulaunoy and A. Iklody, ``MISP - The Design and Implementation of a Collaborative Threat Intelligence Sharing Platform,'' in \textit{Proc. ACM Symposium on Information, Computer and Communications Security}, 2016.
+\bibitem{tounsi} W. Tounsi and H. Rais, ``A Survey on Technical Threat Intelligence in the Age of Sophisticated Cyber Attacks,'' \textit{Computers \& Security}, vol.~72, pp.~212--233, 2018.
+\bibitem{mavroeidis} V. Mavroeidis and S. Bromander, ``Cyber Threat Intelligence Model: An Evaluation of Taxonomies, Sharing Standards, and Ontologies within Cyber Threat Intelligence,'' in \textit{European Intelligence and Security Informatics Conference (EISIC)}, 2017.
+\bibitem{wagner} T. D. Wagner, K. Mahbub, E. Palber, and A. E. Abdallah, ``Cyber Threat Intelligence Sharing: Survey and Research Directions,'' \textit{Computers \& Security}, vol.~87, 2019.
+\bibitem{brown} R. Brown and R. M. Lee, ``The Evolution of Cyber Threat Intelligence (CTI): 2019 SANS CTI Survey,'' SANS Institute, 2019.
+\bibitem{husari} G. Husari, E. Al-Shaer, M. Ahmed, B. Chu, and X. Niu, ``TTPDrill: Automatic and Accurate Extraction of Threat Actions from Unstructured Text of CTI Sources,'' in \textit{Proc. 33rd Annual Computer Security Applications Conference (ACSAC)}, 2017.
+\bibitem{splunk} Splunk Inc., ``Splunk Enterprise Security Threat Intelligence Framework,'' [Online]. Available: https://docs.splunk.com/Documentation/ES
+\bibitem{mitre} MITRE Corporation, ``MITRE ATT\&CK: A Globally-Accessible Knowledge Base of Adversary Tactics and Techniques,'' [Online]. Available: https://attack.mitre.org
+\bibitem{n8n} n8n GmbH, ``n8n.io - Workflow Automation,'' [Online]. Available: https://n8n.io
+\bibitem{malwarebazaar} Abuse.ch, ``MalwareBazaar Database,'' [Online]. Available: https://bazaar.abuse.ch/
+\bibitem{abuseipdb} AbuseIPDB, ``IP Address Abuse Reports,'' [Online]. Available: https://www.abuseipdb.com/
+\end{thebibliography}
+
+\end{document}
