@@ -25,9 +25,10 @@ Write-Host ""
 Write-Host "=== Wazuh + Sysmon -> n8n End-to-End Pipeline Test ===" -ForegroundColor Cyan
 Write-Host ""
 
-# The known-bad IP and domain from our URLhaus database
-$targetIp = "104.236.37.21"
-$targetDomain = "102policeonlainedtp.vercel.app"
+# The known-bad IP and URL from our URLhaus database
+$targetIp = "110.36.2.23"
+$targetUrl = "http://2026policedtp.vercel.app/"
+$targetDomain = ([uri]$targetUrl).Host
 
 # TEST 1 - Network connection to known-bad IP (port 53)
 Write-Host "--- Test 1: Outbound network connection to known-bad IP ---" -ForegroundColor Cyan
@@ -45,7 +46,8 @@ try {
 # TEST 2 - DNS query to known-bad domain
 Write-Host ""
 Write-Host "--- Test 2: DNS query to known-bad domain ---" -ForegroundColor Cyan
-Write-Host "  Target Domain: ${targetDomain}" -ForegroundColor Yellow
+Write-Host "  Target URL   : ${targetUrl}" -ForegroundColor Yellow
+Write-Host "  Target Host  : ${targetDomain}" -ForegroundColor Yellow
 Write-Host "  Action       : Clearing DNS cache and running 'Resolve-DnsName -Name $targetDomain' (Sysmon logs this as Event 22)" -ForegroundColor Yellow
 
 try {
